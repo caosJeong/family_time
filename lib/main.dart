@@ -372,9 +372,21 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
       ),
     );
   }
-
-  // --- [5] 리스트 빌더 (필터링 & 수정/삭제 기능 포함) ---
-  // 리스트 빌더 위젯 (스케줄/할 일 공용)
+  Future<void> _toggleComplete(bool isSchedule, Map<String, dynamic> item) async {
+    final table = isSchedule ? 'schedules' : 'todos';
+    final bool currentStatus = item['is_completed'] ?? false;
+    
+    try {
+      await Supabase.instance.client
+          .from(table)
+          .update({'is_completed': !currentStatus})
+          .eq('id', item['id']);
+      // StreamBuilder가 자동으로 화면을 갱신합니다.
+    } catch (e) {
+      debugPrint('상태 변경 실패: $e');
+    }
+  }
+  
   Widget _buildListStream(bool isSchedule, String dateStr) {
     // 1. 테이블 및 쿼리 기본 설정
     final table = isSchedule ? 'schedules' : 'todos';
@@ -382,10 +394,8 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     
     // 2. 쿼리 필터링 조건 설정
     if (isSchedule) {
-      // 스케줄: 해당 날짜의 데이터만
       query = query.eq('start_date', dateStr);
     } else {
-      // 할 일: 선택된 스케줄이 있으면 FK로, 없으면 날짜로 조회
       if (_selectedScheduleId != null) {
         query = query.eq('schedule_id', _selectedScheduleId);
       } else {
@@ -394,24 +404,18 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     }
 
     return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: query.order('created_at'), // 생성순 정렬
+      stream: query.order('created_at'),
       builder: (context, snapshot) {
-        // 로딩 상태 처리
         if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
         
-        // 3. 비즈니스 로직: '나만 보기' 필터링 (Client-side Filtering)
-        // widget.userData['id']는 public.users 테이블의 PK(int)입니다.
         final int myUserId = widget.userData['id'];
 
         final items = snapshot.data!.where((item) {
           final bool isPrivate = item['is_private'] ?? false;
-          final int? creatorId = item['created_by']; // DB에서 int로 저장됨
-          
-          // 조건: 공개글(false)이거나, 비공개글이면 작성자가 나(myUserId)여야 함
+          final int? creatorId = item['created_by']; 
           return !isPrivate || (creatorId == myUserId);
         }).toList();
 
-        // 데이터 없음 처리
         if (items.isEmpty) {
           return Center(
             child: Text(
@@ -421,63 +425,70 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
           );
         }
 
-        // 4. UI 렌더링
         return ListView.builder(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
           itemCount: items.length,
           itemBuilder: (context, index) {
             final item = items[index];
             final bool isPrivate = item['is_private'] ?? false;
-            
-            // 스케줄 선택 상태 확인
             final bool isSelected = isSchedule && (_selectedScheduleId == item['id']);
+            
+            // [추가] 완료 여부 가져오기 (DB에 is_completed 컬럼이 있어야 함)
+            final bool isDone = item['is_completed'] ?? false;
 
             return InkWell(
-              // 탭 이벤트: 스케줄이면 선택 토글, 할 일이면 없음(추후 완료 처리)
+              // 본문 탭: 스케줄 선택 (완료된 건 선택 시에도 시각적 구분이 유지됨)
               onTap: isSchedule 
                   ? () => setState(() => _selectedScheduleId = isSelected ? null : item['id']) 
                   : null,
-                  
-              // 롱 프레스 이벤트: 수정/삭제 메뉴 호출
               onLongPress: () => _showEditDeleteMenu(isSchedule, item),
+              borderRadius: BorderRadius.circular(10),
               
-              borderRadius: BorderRadius.circular(10), // 터치 효과 둥글게
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 6),
-                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10), // 패딩 약간 조정
                 decoration: BoxDecoration(
-                  // 선택된 스케줄은 파란색 배경 강조
                   color: isSelected ? Colors.blue.withOpacity(0.1) : Colors.transparent,
                   borderRadius: BorderRadius.circular(10),
                   border: isSelected ? Border.all(color: Colors.blue.withOpacity(0.3)) : null,
                 ),
                 child: Row(
                   children: [
-                    // 아이콘 (스케줄은 선택 표시, 할 일은 점)
-                    Icon(
-                      isSchedule 
-                        ? (isSelected ? Icons.check_circle : Icons.circle_outlined)
-                        : Icons.fiber_manual_record, // 작은 점
-                      size: isSchedule ? 22 : 14,
-                      color: isSelected ? Colors.blue : Colors.grey,
+                    // [수정] 아이콘을 버튼으로 변경 (완료 토글 기능)
+                    IconButton(
+                      icon: Icon(
+                        // 완료됨 ? 체크박스 : (스케줄 선택됨 ? 체크원 : 빈원/점)
+                        isDone 
+                            ? Icons.check_box 
+                            : (isSchedule 
+                                ? (isSelected ? Icons.check_circle : Icons.circle_outlined)
+                                : Icons.check_box_outline_blank), // 할 일은 네모 박스로
+                        color: isDone ? Colors.green : (isSelected ? Colors.blue : Colors.grey),
+                        size: 24,
+                      ),
+                      // 아이콘 클릭 시 DB 업데이트 함수 호출
+                      onPressed: () => _toggleComplete(isSchedule, item),
                     ),
-                    const SizedBox(width: 10),
+                    
+                    const SizedBox(width: 5),
 
-                    // 비밀글 자물쇠 아이콘 표시
+                    // 비밀글 아이콘
                     if (isPrivate) ...[
                       const Icon(Icons.lock, size: 16, color: Colors.grey),
                       const SizedBox(width: 6),
                     ],
 
-                    // 텍스트 내용
+                    // [수정] 텍스트 스타일 (취소선 적용)
                     Expanded(
                       child: Text(
                         item[isSchedule ? 'title' : 'content'] ?? '',
                         style: TextStyle(
                           fontSize: 20,
-                          // 선택된 항목은 굵게 및 파란색
+                          // 완료되면 회색 & 취소선, 아니면 기존 로직
+                          color: isDone ? Colors.grey : (isSelected ? Colors.blue : Colors.black87),
                           fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                          color: isSelected ? Colors.blue : Colors.black87,
+                          decoration: isDone ? TextDecoration.lineThrough : TextDecoration.none,
+                          decorationColor: Colors.grey, // 취소선 색상
                         ),
                       ),
                     ),
