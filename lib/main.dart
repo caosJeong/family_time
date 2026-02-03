@@ -2,14 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart'; // import 추가
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // 1. .env 파일을 먼저 읽어옵니다.
   await dotenv.load(fileName: ".env");
 
-  // 2. 파일에 적힌 값을 꺼내서 사용합니다.
   await Supabase.initialize(
     url: dotenv.env['SUPABASE_URL']!,
     anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
@@ -25,17 +23,15 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      // --- 한국어 설정 시작 ---
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
       supportedLocales: const [
-        Locale('ko', 'KR'), // 한국어 설정
+        Locale('ko', 'KR'),
       ],
-      locale: const Locale('ko', 'KR'), // 앱의 기본 언어를 한국어로 고정
-      // --- 한국어 설정 끝 ---
+      locale: const Locale('ko', 'KR'),
       theme: ThemeData(
         useMaterial3: true,
         primarySwatch: Colors.blue,
@@ -49,7 +45,6 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// --- [1] 가입 여부 확인 ---
 class AuthCheck extends StatefulWidget {
   const AuthCheck({super.key});
   @override
@@ -85,7 +80,6 @@ class _AuthCheckState extends State<AuthCheck> {
   }
 }
 
-// --- [2] 초기 가입 페이지 ---
 class SetupPage extends StatefulWidget {
   const SetupPage({super.key});
   @override
@@ -136,7 +130,6 @@ class _SetupPageState extends State<SetupPage> {
   }
 }
 
-// --- [3] 메인 화면 (날짜 선택 필수 기능 추가) ---
 class FamilySchedulePage extends StatefulWidget {
   final Map<String, dynamic> userData;
   const FamilySchedulePage({super.key, required this.userData});
@@ -152,15 +145,11 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
   DateTime? _pickedDate;
   int? _selectedScheduleId;
   
-  // 수정 시 사용할 ID (null이면 새로 등록)
   int? _editingId;
-  // '나만 보기' 상태 변수
   bool _isPrivate = false;
 
-  // --- [1] 데이터 저장 및 수정 로직 ---
   Future<void> _saveData(bool isSchedule) async {
     if (_inputController.text.isEmpty) return;
-    // 등록 시 사용할 날짜 (현재 선택된 날짜 기준)
     final String dateStr = DateFormat('yyyy-MM-dd').format(_pickedDate ?? _today);
     final String table = isSchedule ? 'schedules' : 'todos';
     final int? myUserId = widget.userData['id'];
@@ -185,11 +174,9 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
           } else {
             await Supabase.instance.client.from(table).update(data).eq('id', _editingId!);
           }
-          // [중요] 저장 성공 후 로컬 상태를 초기화하여 화면이 재구성되도록 유도
           setState(() {
             _inputController.clear();
             _editingId = null;
-            // 할 일을 등록한 경우, 전체 보기 모드라면 날짜를 오늘로 맞춰줌
             if (!isSchedule && _selectedScheduleId == null) {
               _today = _pickedDate ?? _today;
             }
@@ -202,7 +189,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     }
   }
 
-  // --- [2] 삭제 로직 ---
   Future<void> _deleteData(bool isSchedule, int id) async {
     final table = isSchedule ? 'schedules' : 'todos';
     try {
@@ -213,14 +199,11 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     }
   }
 
-  // --- [3] 다이얼로그 (등록/수정 공용) ---
   void _showDialog(bool isSchedule, {Map<String, dynamic>? item}) {
-    // 수정 모드일 경우 데이터 채워넣기
     if (item != null) {
       _editingId = item['id'];
       _inputController.text = item[isSchedule ? 'title' : 'content'];
       _isPrivate = item['is_private'] ?? false;
-      // 날짜는 기존 날짜 유지 또는 변경 가능하도록 로직 추가 가능
     } else {
       _editingId = null;
       _inputController.clear();
@@ -243,7 +226,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
               ),
               const SizedBox(height: 15),
               
-              // 1. 날짜 선택 (스케줄 등록 시에만 노출)
               if (isSchedule && _editingId == null) ...[
                 ElevatedButton.icon(
                   onPressed: () async {
@@ -262,8 +244,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                 const SizedBox(height: 10),
               ],
 
-              // 2. 공개 여부 설정 (일반 할 일 또는 스케줄일 때만)
-              // 스케줄에 종속된 할 일은 스케줄 설정을 따라간다고 가정하여 숨김
               if (isSchedule || _selectedScheduleId == null)
                 SwitchListTile(
                   title: const Text("나만 보기", style: TextStyle(fontSize: 16)),
@@ -290,11 +270,9 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     if (mounted) Navigator.pop(context);
   }
 
-  // --- [4] 메인 UI ---
   @override
   Widget build(BuildContext context) {
     final String dateStr = DateFormat('yyyy-MM-dd').format(_today);
-    // 한국어 설정 덕분에 'E' 패턴이 '월', '화' 등으로 자동 출력됨
     final String formattedDay = DateFormat('M월 d일 (E)', 'ko_KR').format(_today);
     final String familyName = widget.userData['family_groups']?['name'] ?? 'Family';
 
@@ -309,24 +287,20 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
           )
         ],
       ),
-      // [GestureDetector 위치] Scaffold의 body 전체를 감싸야 화면 어디를 밀어도 작동함
       body: GestureDetector(
         onHorizontalDragEnd: (details) {
           if (details.primaryVelocity == null) return;
-          // 오른쪽(->)으로 밀면 속도가 양수: 어제
           if (details.primaryVelocity! > 0) {
             _changeDate(-1);
           } 
-          // 왼쪽(<-)으로 밀면 속도가 음수: 내일
           else if (details.primaryVelocity! < 0) {
             _changeDate(1);
           }
         },
         child: Container(
-          color: Colors.transparent, // 터치 영역 확보용
+          color: Colors.transparent,
           child: Column(
             children: [
-              // 날짜 헤더 (화살표 포함)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
                 child: Row(
@@ -340,38 +314,111 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
               ),
               const Divider(height: 1),
               
-              // 스케줄 영역
               Expanded(child: _buildListStream(true, dateStr)),
               
               const Divider(thickness: 2),
               
-              // 할 일 영역 타이틀
               Padding(
                 padding: const EdgeInsets.all(15.0),
                 child: Text(_selectedScheduleId == null ? '해야 할 일' : '선택된 일정의 할 일', 
                   style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               ),
               
-              // 할 일 영역
               Expanded(child: _buildListStream(false, dateStr)),
               
-              // 하단 버튼
-              Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  children: [
-                    Expanded(child: ElevatedButton(onPressed: () => _showDialog(true), child: const Text('일정 등록'))),
-                    const SizedBox(width: 15),
-                    Expanded(child: ElevatedButton(onPressed: () => _showDialog(false), child: const Text('할 일 추가'))),
-                  ],
-                ),
-              )
+              // [수정된 부분] _buildBottomButtons 메서드 호출로 변경
+              _buildBottomButtons(), 
             ],
           ),
         ),
       ),
     );
   }
+
+  // [추가된 부분] 어르신 맞춤형 큰 버튼 위젯
+  Widget _buildBottomButtons() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withOpacity(0.2),
+            spreadRadius: 1,
+            blurRadius: 10,
+            offset: const Offset(0, -3), 
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: SizedBox(
+              height: 70, 
+              child: ElevatedButton(
+                onPressed: () => _showDialog(true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue, 
+                  foregroundColor: Colors.white, 
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(15), 
+                  ),
+                  elevation: 5, 
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.calendar_month, size: 28), 
+                    SizedBox(width: 8),
+                    Text(
+                      '일정 등록',
+                      style: TextStyle(
+                        fontSize: 24, 
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 15), 
+          
+          Expanded(
+            child: SizedBox(
+              height: 70,
+              child: ElevatedButton(
+                onPressed: () => _showDialog(false),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange, 
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  elevation: 5,
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.check_circle_outline, size: 28),
+                    SizedBox(width: 8),
+                    Text(
+                      '할 일 추가',
+                      style: TextStyle(
+                        fontSize: 24, 
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _toggleComplete(bool isSchedule, Map<String, dynamic> item) async {
     final table = isSchedule ? 'schedules' : 'todos';
     final bool currentStatus = item['is_completed'] ?? false;
@@ -381,18 +428,15 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
           .from(table)
           .update({'is_completed': !currentStatus})
           .eq('id', item['id']);
-      // StreamBuilder가 자동으로 화면을 갱신합니다.
     } catch (e) {
       debugPrint('상태 변경 실패: $e');
     }
   }
   
   Widget _buildListStream(bool isSchedule, String dateStr) {
-    // 1. 테이블 및 쿼리 기본 설정
     final table = isSchedule ? 'schedules' : 'todos';
     dynamic query = Supabase.instance.client.from(table).stream(primaryKey: ['id']);
     
-    // 2. 쿼리 필터링 조건 설정
     if (isSchedule) {
       query = query.eq('start_date', dateStr);
     } else {
@@ -433,11 +477,9 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
             final bool isPrivate = item['is_private'] ?? false;
             final bool isSelected = isSchedule && (_selectedScheduleId == item['id']);
             
-            // [추가] 완료 여부 가져오기 (DB에 is_completed 컬럼이 있어야 함)
             final bool isDone = item['is_completed'] ?? false;
 
             return InkWell(
-              // 본문 탭: 스케줄 선택 (완료된 건 선택 시에도 시각적 구분이 유지됨)
               onTap: isSchedule 
                   ? () => setState(() => _selectedScheduleId = isSelected ? null : item['id']) 
                   : null,
@@ -446,7 +488,7 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
               
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 6),
-                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10), // 패딩 약간 조정
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10), 
                 decoration: BoxDecoration(
                   color: isSelected ? Colors.blue.withOpacity(0.1) : Colors.transparent,
                   borderRadius: BorderRadius.circular(10),
@@ -454,41 +496,35 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                 ),
                 child: Row(
                   children: [
-                    // [수정] 아이콘을 버튼으로 변경 (완료 토글 기능)
                     IconButton(
                       icon: Icon(
-                        // 완료됨 ? 체크박스 : (스케줄 선택됨 ? 체크원 : 빈원/점)
                         isDone 
                             ? Icons.check_box 
                             : (isSchedule 
                                 ? (isSelected ? Icons.check_circle : Icons.circle_outlined)
-                                : Icons.check_box_outline_blank), // 할 일은 네모 박스로
+                                : Icons.check_box_outline_blank), 
                         color: isDone ? Colors.green : (isSelected ? Colors.blue : Colors.grey),
                         size: 24,
                       ),
-                      // 아이콘 클릭 시 DB 업데이트 함수 호출
                       onPressed: () => _toggleComplete(isSchedule, item),
                     ),
                     
                     const SizedBox(width: 5),
 
-                    // 비밀글 아이콘
                     if (isPrivate) ...[
                       const Icon(Icons.lock, size: 16, color: Colors.grey),
                       const SizedBox(width: 6),
                     ],
 
-                    // [수정] 텍스트 스타일 (취소선 적용)
                     Expanded(
                       child: Text(
                         item[isSchedule ? 'title' : 'content'] ?? '',
                         style: TextStyle(
                           fontSize: 20,
-                          // 완료되면 회색 & 취소선, 아니면 기존 로직
                           color: isDone ? Colors.grey : (isSelected ? Colors.blue : Colors.black87),
                           fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                           decoration: isDone ? TextDecoration.lineThrough : TextDecoration.none,
-                          decorationColor: Colors.grey, // 취소선 색상
+                          decorationColor: Colors.grey, 
                         ),
                       ),
                     ),
@@ -502,7 +538,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     );
   }
 
-  // 수정/삭제 팝업 메뉴
   void _showEditDeleteMenu(bool isSchedule, Map<String, dynamic> item) {
     showModalBottomSheet(
       context: context,
@@ -547,11 +582,10 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
       ),
     );
   }
-  // 날짜 변경 로직
+  
   void _changeDate(int days) {
     setState(() {
       _today = _today.add(Duration(days: days));
-      // 날짜가 바뀌면 선택된 스케줄 필터도 초기화하는 것이 자연스럽습니다.
       _selectedScheduleId = null;
     });
   }
