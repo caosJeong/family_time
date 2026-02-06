@@ -30,6 +30,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_launcher_icons: ^0.13.1  # 이 줄을 추가하세요
+  url_launcher: ^6.2.0
+  uuid: ^4.5.2
+  qr_flutter: ^4.1.0       # QR 생성용
+  mobile_scanner: ^5.0.0   # QR 스캔용 (카메라)
+  permission_handler: ^11.0.0 # 카메라 권한 요청용
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -65,6 +71,11 @@ flutter:
   # To add assets to your application, add an assets section, like this:
   assets:
   - .env
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/app_icon.png"
+  min_sdk_android: 21 # 안드로이드 최소 버전 호환
   #   - images/a_dot_burr.jpeg
   #   - images/a_dot_ham.jpeg
 
