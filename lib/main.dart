@@ -11,9 +11,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
 import 'setup_page.dart'; 
-import 'ledger_page.dart'; // [필수] 가계부 페이지
+import 'ledger_page.dart';
+import 'models.dart'; // [객체지향] 생성한 데이터 모델 import
 
-// --- [0] 뷰 모드 상태 정의 ---
 enum ViewMode { daily, weekly, monthly }
 
 void main() async {
@@ -152,7 +152,6 @@ class FamilySchedulePage extends StatefulWidget {
 class _FamilySchedulePageState extends State<FamilySchedulePage> {
     final TextEditingController _inputController = TextEditingController();
     
-    // 탭 상태 (0: 일정, 1: 가계부)
     int _currentIndex = 0; 
 
     DateTime _today = DateTime.now();
@@ -166,9 +165,12 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     int? _selectedScheduleId;
     int? _editingId;
     bool _isPrivate = false;
+    bool _isUndecided = false; // [추가] 할 일 기간 미정 상태
     
-    List<Map<String, dynamic>> _schedules = [];
-    List<Map<String, dynamic>> _todos = [];
+    // [객체지향] Map 대신 정의한 클래스 모델 List로 변경
+    List<ScheduleItem> _schedules = [];
+    List<TodoItem> _todos = [];
+    
     List<Map<String, dynamic>> _completions = [];
     List<Map<String, dynamic>> _familyMembers = [];
     List<Map<String, dynamic>> _myFamilyHistoryList = [];
@@ -181,7 +183,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         _fetchData();
     }
 
-    // --- [UI] 상단 탭 버튼 ---
     Widget _buildTopSegment() {
         return Container(
             margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
@@ -256,7 +257,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                     const SizedBox(width: 10),
                 ],
             ),
-            
             body: Column(
                 children: [
                     _buildTopSegment(),
@@ -270,7 +270,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         );
     }
 
-    // --- 달력 페이지 ---
     Widget _buildCalendarPage() {
         return _isLoading 
                 ? const Center(child: CircularProgressIndicator()) 
@@ -438,13 +437,8 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
             final myUserId = widget.userData['id'];
 
             final todoRes = await Supabase.instance.client.from('todos').select().eq('family_id', familyId).order('due_date');
+            final scheduleRes = await Supabase.instance.client.from('schedules').select().eq('family_id', familyId).order('start_date');
 
-            // [수정됨] 일정은 반복 일정도 가져와야 하므로, 날짜 필터를 제거하고 전체를 가져온 뒤 Dart에서 필터링합니다.
-            final scheduleRes = await Supabase.instance.client
-                    .from('schedules').select().eq('family_id', familyId)
-                    .order('start_date');
-
-            // 날짜 범위 계산 (완료된 할 일 등을 위해서 필요)
             DateTime startDt, endDt;
             if (_viewMode == ViewMode.daily) {
                 startDt = DateTime(_today.year, _today.month, _today.day);
@@ -470,17 +464,15 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
 
             if (mounted) {
                 setState(() {
-                    _schedules = List<Map<String, dynamic>>.from(scheduleRes).where((item) {
-                        final bool isPrivate = item['is_private'] ?? false;
-                        return !isPrivate || (item['created_by'] == myUserId);
+                    // [객체지향] ScheduleItem 객체 리스트로 변환
+                    _schedules = (scheduleRes as List).map((e) => ScheduleItem.fromMap(e)).where((item) {
+                        return !item.isPrivate || (item.createdBy == myUserId);
                     }).toList();
 
-                    _todos = List<Map<String, dynamic>>.from(todoRes).where((item) {
-                        final bool isPrivate = item['is_private'] ?? false;
-                        final int creator = item['created_by'];
-                        final int? assignee = item['assignee_id'];
-                        if (isPrivate) {
-                            return creator == myUserId || assignee == myUserId;
+                    // [객체지향] TodoItem 객체 리스트로 변환
+                    _todos = (todoRes as List).map((e) => TodoItem.fromMap(e)).where((item) {
+                        if (item.isPrivate) {
+                            return item.createdBy == myUserId || item.assigneeId == myUserId;
                         }
                         return true;
                     }).toList();
@@ -536,47 +528,52 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         if (_inputController.text.isEmpty) return;
         
         final start = _pickedDate ?? DateTime.now();
-        final startStr = start.toIso8601String(); 
         final myUserId = widget.userData['id'];
 
-        final Map<String, dynamic> data = {
-            if (isSchedule) 'title': _inputController.text else 'content': _inputController.text,
-            'is_private': _isPrivate,
-            'repeat_option': _repeatOption, // [NEW] 일정, 할 일 공통 저장
-        };
-
         try {
-            if (_editingId == null) {
-                data['family_id'] = widget.userData['family_id'];
-                data['created_by'] = myUserId;
-                
-                if (isSchedule) {
-                    data['start_date'] = startStr;
-                    DateTime end = _pickedEndDate ?? start;
-                    if (end.isBefore(start)) end = start.add(const Duration(hours: 1));
-                    data['end_date'] = end.toIso8601String();
-                } else {
-                    data['target_date'] = startStr;
-                    DateTime due = _pickedDueDate ?? start;
-                    if (due.isBefore(start)) due = start; 
-                    data['due_date'] = due.toIso8601String();
-                    data['schedule_id'] = _selectedScheduleId;
-                    data['assignee_id'] = myUserId; 
-                }
-                
-                final table = isSchedule ? 'schedules' : 'todos';
-                await Supabase.instance.client.from(table).insert(data);
+            if (isSchedule) {
+                DateTime end = _pickedEndDate ?? start;
+                if (end.isBefore(start)) end = start.add(const Duration(hours: 1));
 
-            } else {
-                if (isSchedule) {
-                    data['start_date'] = _pickedDate!.toIso8601String();
-                    data['end_date'] = _pickedEndDate!.toIso8601String();
+                final ScheduleItem newItem = ScheduleItem(
+                    id: _editingId,
+                    familyId: widget.userData['family_id'],
+                    createdBy: myUserId,
+                    title: _inputController.text,
+                    startDate: start,
+                    endDate: end,
+                    isPrivate: _isPrivate,
+                    repeatOption: _repeatOption,
+                );
+
+                if (_editingId == null) {
+                    await Supabase.instance.client.from('schedules').insert(newItem.toMap());
                 } else {
-                    data['target_date'] = _pickedDate!.toIso8601String();
-                    data['due_date'] = _pickedDueDate!.toIso8601String();
+                    await Supabase.instance.client.from('schedules').update(newItem.toMap()).eq('id', _editingId!);
                 }
-                final table = isSchedule ? 'schedules' : 'todos';
-                await Supabase.instance.client.from(table).update(data).eq('id', _editingId!);
+            } else {
+                DateTime due = _pickedDueDate ?? start;
+                if (due.isBefore(start)) due = start; 
+
+                final TodoItem newItem = TodoItem(
+                    id: _editingId,
+                    familyId: widget.userData['family_id'],
+                    createdBy: myUserId,
+                    content: _inputController.text,
+                    targetDate: start,
+                    dueDate: due,
+                    scheduleId: _selectedScheduleId,
+                    assigneeId: myUserId,
+                    isPrivate: _isPrivate,
+                    repeatOption: _repeatOption,
+                    isUndecided: _isUndecided, // [기능] 기간 미정
+                );
+
+                if (_editingId == null) {
+                    await Supabase.instance.client.from('todos').insert(newItem.toMap());
+                } else {
+                    await Supabase.instance.client.from('todos').update(newItem.toMap()).eq('id', _editingId!);
+                }
             }
             
             _closeDialog();
@@ -616,7 +613,7 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
             final Map<String, dynamic> updateData = {
                 'description': memo,
                 'link_url': link,
-                'repeat_option': repeatOption, // [NEW] 수정 시 반복 옵션 업데이트
+                'repeat_option': repeatOption,
             };
 
             await Supabase.instance.client
@@ -631,18 +628,33 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         }
     }
 
-    Future<void> _toggleComplete(bool isSchedule, Map<String, dynamic> item, DateTime date) async {
+    // [수정된 로직] 미정 할 일을 완료(체크) 시 미정 상태를 풀고 선택한 날짜로 확정
+    Future<void> _toggleComplete(bool isSchedule, int itemId, DateTime date) async {
         if (isSchedule) return;
         final dateStr = DateFormat('yyyy-MM-dd').format(date);
-        final todoId = item['id'];
 
-        final bool isCompleted = _completions.any((c) => c['todo_id'] == item['id'] && c['completed_date'] == dateStr);
-        
+        final bool isCompleted = _completions.any((c) => c['todo_id'] == itemId && c['completed_date'] == dateStr);
+        final todoItem = _todos.firstWhere((t) => t.id == itemId);
+
         try {
             if (isCompleted) {
-                await Supabase.instance.client.from('todo_completions').delete().eq('todo_id', todoId).eq('completed_date', dateStr);
+                // 완료 취소
+                await Supabase.instance.client.from('todo_completions').delete().eq('todo_id', itemId).eq('completed_date', dateStr);
             } else {
-                await Supabase.instance.client.from('todo_completions').insert({'todo_id': todoId, 'completed_date': dateStr});
+                // 완료 처리
+                await Supabase.instance.client.from('todo_completions').insert({'todo_id': itemId, 'completed_date': dateStr});
+                
+                // [추가] 기간 미정인 할 일을 체크했다면, 지금 보고 있는 날짜를 확정 날짜로 변경
+                if (todoItem.isUndecided) {
+                    final targetDt = DateTime(date.year, date.month, date.day, 9, 0); // 기본 시작 시간(오전 9시)
+                    final dueDt = DateTime(date.year, date.month, date.day, 23, 59, 59);  // 당일 자정 전
+
+                    await Supabase.instance.client.from('todos').update({
+                        'is_undecided': false,
+                        'target_date': targetDt.toIso8601String(),
+                        'due_date': dueDt.toIso8601String(),
+                    }).eq('id', itemId);
+                }
             }
             await _fetchData();
         } catch (e) {
@@ -650,12 +662,9 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         }
     }
 
-    void _showAddToLedgerDialog(Map<String, dynamic> item, bool isSchedule, DateTime viewDate) {
+    void _showAddToLedgerDialog(String title, bool isSchedule, DateTime viewDate) {
         final TextEditingController amountCtrl = TextEditingController();
-        final String title = item[isSchedule ? 'title' : 'content'] ?? '';
-        
         DateTime date = viewDate;
-        
         String selectedCategory = '공과금'; 
         final List<String> categories = ['식비', '공과금', '대출', '쇼핑', '기타'];
 
@@ -750,10 +759,13 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         );
     }
 
-    void _showDetailDialog(bool isSchedule, Map<String, dynamic> item, DateTime viewDate) {
-        final TextEditingController memoCtrl = TextEditingController(text: item['description'] ?? '');
-        final TextEditingController linkCtrl = TextEditingController(text: item['link_url'] ?? '');
-        String currentRepeat = item['repeat_option'] ?? 'none';
+    void _showDetailDialog(bool isSchedule, dynamic item, DateTime viewDate) {
+        final String initialMemo = item.description ?? '';
+        final String initialLink = item.linkUrl ?? '';
+        String currentRepeat = item.repeatOption;
+        
+        final TextEditingController memoCtrl = TextEditingController(text: initialMemo);
+        final TextEditingController linkCtrl = TextEditingController(text: initialLink);
 
         showDialog(
             context: context,
@@ -770,7 +782,6 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                                     const Text("📝 상세 내용 / 설정", style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
                                     const SizedBox(height: 25),
                                     
-                                    // [수정됨] 반복 설정 (일정도 표시)
                                     const Text("반복 설정", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blue)),
                                     const SizedBox(height: 8),
                                     Container(
@@ -791,9 +802,9 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                                     const SizedBox(height: 20),
                                     TextField(controller: linkCtrl, style: const TextStyle(fontSize: 20, color: Colors.blue), decoration: InputDecoration(labelText: '웹 링크 (URL)', prefixIcon: const Icon(Icons.link), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15)), filled: true, fillColor: Colors.white)),
                                     
-                                    if (item['link_url'] != null && item['link_url'] != '') ...[
+                                    if (item.linkUrl != null && item.linkUrl!.isNotEmpty) ...[
                                         const SizedBox(height: 10),
-                                        ElevatedButton.icon(onPressed: () => _launchURL(item['link_url']), icon: const Icon(Icons.open_in_new), label: const Text("링크 열기", style: TextStyle(fontSize: 18)), style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade50, foregroundColor: Colors.green)),
+                                        ElevatedButton.icon(onPressed: () => _launchURL(item.linkUrl), icon: const Icon(Icons.open_in_new), label: const Text("링크 열기", style: TextStyle(fontSize: 18)), style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade50, foregroundColor: Colors.green)),
                                     ],
                                     const SizedBox(height: 15),
 
@@ -802,7 +813,7 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                                         height: 55,
                                         margin: const EdgeInsets.only(bottom: 10),
                                         child: OutlinedButton.icon(
-                                            onPressed: () => _showAddToLedgerDialog(item, isSchedule, viewDate), 
+                                            onPressed: () => _showAddToLedgerDialog(isSchedule ? item.title : item.content, isSchedule, viewDate), 
                                             icon: const Icon(Icons.account_balance_wallet, color: Colors.orange, size: 28),
                                             label: const Text("가계부로 보내기", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.orange)),
                                             style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.orange, width: 2), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))),
@@ -812,7 +823,7 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                                     ElevatedButton(
                                         onPressed: () { 
                                             Navigator.pop(context); 
-                                            _saveDetail(isSchedule, item['id'], memoCtrl.text, linkCtrl.text, currentRepeat); 
+                                            _saveDetail(isSchedule, item.id!, memoCtrl.text, linkCtrl.text, currentRepeat); 
                                         },
                                         style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)), backgroundColor: Colors.blue, foregroundColor: Colors.white),
                                         child: const Text("저장 완료", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
@@ -826,7 +837,7 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         );
     }
 
-    void _showAssignDialog(Map<String, dynamic> todo) {
+    void _showAssignDialog(TodoItem todo) {
         showModalBottomSheet(
             context: context,
             builder: (context) {
@@ -838,12 +849,12 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                             const Text("누구에게 부탁할까요?", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                             const SizedBox(height: 20),
                             ..._familyMembers.map((member) {
-                                final bool isAssigned = member['id'] == todo['assignee_id'];
+                                final bool isAssigned = member['id'] == todo.assigneeId;
                                 return ListTile(
                                     leading: CircleAvatar(backgroundColor: isAssigned ? Colors.blue : Colors.grey.shade200, child: Icon(Icons.person, color: isAssigned ? Colors.white : Colors.grey)),
                                     title: Text(member['nickname'] ?? '이름 없음', style: const TextStyle(fontSize: 20)),
                                     trailing: isAssigned ? const Icon(Icons.check, color: Colors.blue) : null,
-                                    onTap: () { Navigator.pop(context); if (member['id'] != todo['assignee_id']) _assignTodo(todo['id'], member['id']); },
+                                    onTap: () { Navigator.pop(context); if (member['id'] != todo.assigneeId) _assignTodo(todo.id!, member['id']); },
                                 );
                             }),
                         ],
@@ -853,19 +864,23 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         );
     }
 
-    void _showDialog(bool isSchedule, {Map<String, dynamic>? item, DateTime? specificDate}) {
+    void _showDialog(bool isSchedule, {dynamic item, DateTime? specificDate}) {
         if (item != null) {
-            _editingId = item['id'];
-            _inputController.text = item[isSchedule ? 'title' : 'content'];
-            _isPrivate = item['is_private'] ?? false;
-            _repeatOption = item['repeat_option'] ?? 'none'; 
+            _editingId = item.id;
+            _isPrivate = item.isPrivate;
+            _repeatOption = item.repeatOption; 
 
             if (isSchedule) {
-                _pickedDate = DateTime.parse(item['start_date']);
-                _pickedEndDate = DateTime.parse(item['end_date']);
+                final ScheduleItem sItem = item as ScheduleItem;
+                _inputController.text = sItem.title;
+                _pickedDate = sItem.startDate;
+                _pickedEndDate = sItem.endDate;
             } else {
-                _pickedDate = DateTime.parse(item['target_date']);
-                _pickedDueDate = DateTime.parse(item['due_date']);
+                final TodoItem tItem = item as TodoItem;
+                _inputController.text = tItem.content;
+                _pickedDate = tItem.targetDate;
+                _pickedDueDate = tItem.dueDate;
+                _isUndecided = tItem.isUndecided;
             }
         } else {
             _editingId = null;
@@ -877,6 +892,7 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
             _pickedDueDate = endOfDay;
             _isPrivate = false;
             _repeatOption = 'none';
+            _isUndecided = false;
         }
 
         showDialog(
@@ -897,34 +913,49 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                                     const SizedBox(height: 25),
                                     TextField(controller: _inputController, autofocus: true, style: const TextStyle(fontSize: 22, color: Colors.black), decoration: InputDecoration(hintText: '내용을 입력하세요', filled: true, fillColor: Colors.grey.shade100, contentPadding: const EdgeInsets.symmetric(vertical: 18, horizontal: 18), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none))),
                                     const SizedBox(height: 20),
-                                    _buildDateSelector(context, label: isSchedule ? "시작" : "시작일", date: _pickedDate!, onChanged: (d) => setDialogState(() => _pickedDate = d)),
-                                    const SizedBox(height: 12),
-                                    if (isSchedule) 
-                                        _buildDateSelector(context, label: "종료", date: _pickedEndDate!, onChanged: (d) => setDialogState(() => _pickedEndDate = d))
-                                    else 
-                                        _buildDateSelector(context, label: "마감일", date: _pickedDueDate!, onChanged: (d) => setDialogState(() => _pickedDueDate = d), icon: Icons.alarm),
                                     
-                                    const SizedBox(height: 15),
-                                    
-                                    Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 15),
-                                        decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(15)),
-                                        child: DropdownButtonHideUnderline(
-                                            child: DropdownButton<String>(
-                                                value: _repeatOption,
-                                                isExpanded: true,
-                                                items: const [
-                                                    DropdownMenuItem(value: 'none', child: Text('반복 없음')),
-                                                    DropdownMenuItem(value: 'daily', child: Text('매일 반복')),
-                                                    DropdownMenuItem(value: 'weekly', child: Text('매주 반복 (요일)')),
-                                                    DropdownMenuItem(value: 'monthly', child: Text('매월 반복 (날짜)')),
-                                                ],
-                                                onChanged: (val) {
-                                                    if (val != null) setDialogState(() => _repeatOption = val);
-                                                },
+                                    // [기능] 할 일의 경우 '기간 미정' 체크박스 노출
+                                    if (!isSchedule) ...[
+                                        CheckboxListTile(
+                                            title: const Text('기간 미정 (완료 전까지 계속 노출)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                                            value: _isUndecided,
+                                            activeColor: Colors.deepOrange,
+                                            onChanged: (val) => setDialogState(() => _isUndecided = val ?? false),
+                                            controlAffinity: ListTileControlAffinity.leading,
+                                        ),
+                                        const SizedBox(height: 10),
+                                    ],
+
+                                    // 기간 미정이 아닐 때만 날짜 선택기 노출
+                                    if (!_isUndecided) ...[
+                                        _buildDateSelector(context, label: isSchedule ? "시작" : "시작일", date: _pickedDate!, onChanged: (d) => setDialogState(() => _pickedDate = d)),
+                                        const SizedBox(height: 12),
+                                        if (isSchedule) 
+                                            _buildDateSelector(context, label: "종료", date: _pickedEndDate!, onChanged: (d) => setDialogState(() => _pickedEndDate = d))
+                                        else 
+                                            _buildDateSelector(context, label: "마감일", date: _pickedDueDate!, onChanged: (d) => setDialogState(() => _pickedDueDate = d), icon: Icons.alarm),
+                                        const SizedBox(height: 15),
+                                        
+                                        Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 15),
+                                            decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(15)),
+                                            child: DropdownButtonHideUnderline(
+                                                child: DropdownButton<String>(
+                                                    value: _repeatOption,
+                                                    isExpanded: true,
+                                                    items: const [
+                                                        DropdownMenuItem(value: 'none', child: Text('반복 없음')),
+                                                        DropdownMenuItem(value: 'daily', child: Text('매일 반복')),
+                                                        DropdownMenuItem(value: 'weekly', child: Text('매주 반복 (요일)')),
+                                                        DropdownMenuItem(value: 'monthly', child: Text('매월 반복 (날짜)')),
+                                                    ],
+                                                    onChanged: (val) {
+                                                        if (val != null) setDialogState(() => _repeatOption = val);
+                                                    },
+                                                ),
                                             ),
                                         ),
-                                    ),
+                                    ],
 
                                     const SizedBox(height: 25),
                                     GestureDetector(
@@ -961,127 +992,187 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     }
 
     void _closeDialog() {
-        _inputController.clear(); _editingId = null; _pickedDate = null; _pickedEndDate = null; _pickedDueDate = null;
+        _inputController.clear(); _editingId = null; _pickedDate = null; _pickedEndDate = null; _pickedDueDate = null; _isUndecided = false;
         if (mounted) Navigator.pop(context);
     }
 
-    // [수정됨] 롱탭 메뉴에 '상세 설정' 추가
-    void _showEditDeleteMenu(bool isSchedule, Map<String, dynamic> item, DateTime viewDate) {
-        if (item['created_by'] != widget.userData['id']) return;
+    void _showEditDeleteMenu(bool isSchedule, dynamic item, DateTime viewDate) {
+        if (item.createdBy != widget.userData['id']) return;
         showModalBottomSheet(
             context: context,
             builder: (context) => Wrap(
                 children: [
                     ListTile(leading: const Icon(Icons.edit, color: Colors.blue), title: const Text('수정하기'), onTap: () { Navigator.pop(context); _showDialog(isSchedule, item: item); }),
-                    ListTile(leading: const Icon(Icons.delete, color: Colors.red), title: const Text('삭제하기', style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteData(isSchedule, item['id']); }),
+                    ListTile(leading: const Icon(Icons.delete, color: Colors.red), title: const Text('삭제하기', style: TextStyle(color: Colors.red)), onTap: () { Navigator.pop(context); _deleteData(isSchedule, item.id!); }),
                     ListTile(leading: const Icon(Icons.settings, color: Colors.grey), title: const Text('상세 설정'), onTap: () { Navigator.pop(context); _showDetailDialog(isSchedule, item, viewDate); }),
                 ],
             ),
         );
     }
 
-    // [수정됨] 아이콘 클릭 동작 및 아이콘 변경
-    Widget _buildListView(bool isSchedule, DateTime date) {
-        final items = _filterItemsForDate(isSchedule ? _schedules : _todos, date, isSchedule: isSchedule);
-        final dateStr = DateFormat('yyyy-MM-dd').format(date);
-        final myId = widget.userData['id'];
-
-        if (items.isEmpty) return Center(child: Text(isSchedule ? '일정이 없습니다' : '할 일이 없습니다', style: const TextStyle(color: Colors.grey, fontSize: 18)));
+    // [객체지향] Schedule 리스트 뷰 전용
+    Widget _buildScheduleList(DateTime date) {
+        final items = _filterSchedulesForDate(_schedules, date);
+        if (items.isEmpty) return const Center(child: Text('일정이 없습니다', style: TextStyle(color: Colors.grey, fontSize: 18)));
 
         return ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 10), 
             itemCount: items.length, 
             itemBuilder: (context, index) {
                 final item = items[index];
-                final bool isSelected = isSchedule && (_selectedScheduleId == item['id']);
-                final bool isPrivate = item['is_private'] ?? false;
-                final int? assigneeId = item['assignee_id'];
-                final int creatorId = item['created_by'];
-                final bool hasLink = item['link_url'] != null && item['link_url'].toString().trim().isNotEmpty;
-                final bool isReceivedRequest = (creatorId != myId && assigneeId == myId);
-                final bool isSentRequest = (creatorId == myId && assigneeId != null && assigneeId != myId);
-                bool isDone = false;
-                if (!isSchedule) isDone = _completions.any((c) => c['todo_id'] == item['id'] && c['completed_date'] == dateStr);
+                final bool isSelected = (_selectedScheduleId == item.id);
+                final bool hasLink = item.linkUrl != null && item.linkUrl!.trim().isNotEmpty;
 
                 Widget cardContent = Container(
                     margin: const EdgeInsets.symmetric(vertical: 5), 
                     padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 5),
-                    decoration: BoxDecoration(color: isReceivedRequest ? Colors.green.withOpacity(0.1) : (isSelected ? Colors.blue.withOpacity(0.1) : Colors.transparent), borderRadius: BorderRadius.circular(10), border: isSelected ? Border.all(color: Colors.blue.withOpacity(0.3)) : null),
+                    decoration: BoxDecoration(
+                        color: isSelected ? Colors.blue.withOpacity(0.1) : Colors.transparent, 
+                        borderRadius: BorderRadius.circular(10), 
+                        border: isSelected ? Border.all(color: Colors.blue.withOpacity(0.3)) : null
+                    ),
                     child: Row(children: [
-                        if (!isSchedule) IconButton(icon: Icon(isDone ? Icons.check_box : Icons.check_box_outline_blank, color: isDone ? Colors.green : Colors.grey, size: 30), onPressed: () => _toggleComplete(isSchedule, item, date)),
                         const SizedBox(width: 5),
-                        if (isReceivedRequest) const Padding(padding: EdgeInsets.only(right: 8), child: Icon(Icons.card_giftcard, color: Colors.green, size: 20)) else if (isSentRequest) const Padding(padding: EdgeInsets.only(right: 8), child: Icon(Icons.send, color: Colors.orange, size: 20)),
-                        if (isPrivate) const Padding(padding: EdgeInsets.only(right: 5), child: Icon(Icons.lock, size: 16, color: Colors.grey)),
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(item[isSchedule ? 'title' : 'content'] ?? '', style: TextStyle(fontSize: 22, color: isDone ? Colors.grey : (isSelected ? Colors.blue : Colors.black87), fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, decoration: isDone ? TextDecoration.lineThrough : null)), if (assigneeId != null && assigneeId != myId && !isSchedule) FutureBuilder(future: Future.value(_familyMembers.firstWhere((m) => m['id'] == assigneeId, orElse: () => {})['nickname']), builder: (context, snapshot) => snapshot.hasData && snapshot.data != null ? Text("To. ${snapshot.data}", style: const TextStyle(fontSize: 14, color: Colors.grey)) : const SizedBox.shrink()), if (isReceivedRequest && !isSchedule) FutureBuilder(future: Future.value(_familyMembers.firstWhere((m) => m['id'] == creatorId, orElse: () => {})['nickname']), builder: (context, snapshot) => snapshot.hasData && snapshot.data != null ? Text("From. ${snapshot.data}", style: const TextStyle(fontSize: 14, color: Colors.green)) : const SizedBox.shrink())])),
-                        
-                        // [수정 포인트] 아이콘 변경 (edit_note -> edit) 및 동작 변경 (상세 -> 수정 다이얼로그)
+                        if (item.isPrivate) const Padding(padding: EdgeInsets.only(right: 5), child: Icon(Icons.lock, size: 16, color: Colors.grey)),
+                        Expanded(child: Text(item.title, style: TextStyle(fontSize: 22, color: isSelected ? Colors.blue : Colors.black87, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal))),
                         if (hasLink) 
-                            IconButton(icon: const Icon(Icons.open_in_new, color: Colors.blue, size: 30), onPressed: () => _launchURL(item['link_url']), tooltip: '링크 열기') 
+                            IconButton(icon: const Icon(Icons.open_in_new, color: Colors.blue, size: 30), onPressed: () => _launchURL(item.linkUrl), tooltip: '링크 열기') 
                         else 
-                            IconButton(
-                                icon: const Icon(Icons.edit, color: Colors.grey, size: 26), // 아이콘 변경
-                                onPressed: () => _showDialog(isSchedule, item: item), // 동작 변경 (수정)
-                                tooltip: '수정하기'
-                            ) 
+                            IconButton(icon: const Icon(Icons.edit, color: Colors.grey, size: 26), onPressed: () => _showDialog(true, item: item), tooltip: '수정하기') 
                     ]),
                 );
 
-                return Dismissible(
-                    key: Key('item-${isSchedule ? 'S' : 'T'}-${item['id']}'),
-                    direction: !isSchedule ? DismissDirection.horizontal : DismissDirection.startToEnd,
-                    background: Container(color: Colors.orange, alignment: Alignment.centerLeft, padding: const EdgeInsets.symmetric(horizontal: 20), child: const Row(children: [Icon(Icons.edit_note, color: Colors.white, size: 30), SizedBox(width: 10), Text("상세 작성", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))])),
-                    secondaryBackground: Container(color: Colors.green, alignment: Alignment.centerRight, padding: const EdgeInsets.symmetric(horizontal: 20), child: const Row(mainAxisAlignment: MainAxisAlignment.end, children: [Text("부탁하기", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)), SizedBox(width: 10), Icon(Icons.person_add, color: Colors.white, size: 30)])),
-                    confirmDismiss: (direction) async { if (direction == DismissDirection.startToEnd) _showDetailDialog(isSchedule, item, date); else _showAssignDialog(item); return false; }, 
-                    child: InkWell(onTap: isSchedule ? () => setState(() => _selectedScheduleId = isSelected ? null : item['id']) : null, onLongPress: () => _showEditDeleteMenu(isSchedule, item, date), borderRadius: BorderRadius.circular(10), child: cardContent),
+                return InkWell(
+                    onTap: () => setState(() => _selectedScheduleId = isSelected ? null : item.id), 
+                    onLongPress: () => _showEditDeleteMenu(true, item, date), 
+                    borderRadius: BorderRadius.circular(10), 
+                    child: cardContent
                 );
             },
         );
     }
 
-    List<Map<String, dynamic>> _filterItemsForDate(List<Map<String, dynamic>> source, DateTime date, {required bool isSchedule}) {
+    // [객체지향] Todo 리스트 뷰 전용 (기간 미정 UI 포함)
+    Widget _buildTodoList(DateTime date) {
+        final items = _filterTodosForDate(_todos, date);
+        final dateStr = DateFormat('yyyy-MM-dd').format(date);
+        final myId = widget.userData['id'];
+
+        if (items.isEmpty) return const Center(child: Text('할 일이 없습니다', style: TextStyle(color: Colors.grey, fontSize: 18)));
+
+        return ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 10), 
+            itemCount: items.length, 
+            itemBuilder: (context, index) {
+                final item = items[index];
+                final bool hasLink = item.linkUrl != null && item.linkUrl!.trim().isNotEmpty;
+                final bool isReceivedRequest = (item.createdBy != myId && item.assigneeId == myId);
+                final bool isSentRequest = (item.createdBy == myId && item.assigneeId != null && item.assigneeId != myId);
+                final bool isDone = _completions.any((c) => c['todo_id'] == item.id && c['completed_date'] == dateStr);
+
+                Widget cardContent = Container(
+                    margin: const EdgeInsets.symmetric(vertical: 5), 
+                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 5),
+                    decoration: BoxDecoration(
+                        // [UI] 미완료된 '기간 미정' 할 일은 주황색 배경으로 눈에 띄게 처리
+                        color: item.isUndecided && !isDone 
+                            ? Colors.orange.shade50 
+                            : (isReceivedRequest ? Colors.green.withOpacity(0.1) : Colors.transparent), 
+                        borderRadius: BorderRadius.circular(10)
+                    ),
+                    child: Row(children: [
+                        IconButton(icon: Icon(isDone ? Icons.check_box : Icons.check_box_outline_blank, color: isDone ? Colors.green : Colors.grey, size: 30), onPressed: () => _toggleComplete(false, item.id!, date)),
+                        const SizedBox(width: 5),
+                        if (isReceivedRequest) const Padding(padding: EdgeInsets.only(right: 8), child: Icon(Icons.card_giftcard, color: Colors.green, size: 20)) else if (isSentRequest) const Padding(padding: EdgeInsets.only(right: 8), child: Icon(Icons.send, color: Colors.orange, size: 20)),
+                        if (item.isPrivate) const Padding(padding: EdgeInsets.only(right: 5), child: Icon(Icons.lock, size: 16, color: Colors.grey)),
+                        
+                        Expanded(child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start, 
+                            children: [
+                                Row(
+                                    children: [
+                                        if (item.isUndecided)
+                                            Container(
+                                                margin: const EdgeInsets.only(right: 6),
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(color: Colors.orangeAccent.withOpacity(0.2), borderRadius: BorderRadius.circular(4)),
+                                                child: const Text('📌 미정', style: TextStyle(fontSize: 12, color: Colors.deepOrange, fontWeight: FontWeight.bold)),
+                                            ),
+                                        Expanded(
+                                            child: Text(item.content, style: TextStyle(fontSize: 22, color: isDone ? Colors.grey : Colors.black87, decoration: isDone ? TextDecoration.lineThrough : null)),
+                                        ),
+                                    ],
+                                ),
+                                if (item.assigneeId != null && item.assigneeId != myId) 
+                                    FutureBuilder(future: Future.value(_familyMembers.firstWhere((m) => m['id'] == item.assigneeId, orElse: () => {})['nickname']), builder: (context, snapshot) => snapshot.hasData && snapshot.data != null ? Text("To. ${snapshot.data}", style: const TextStyle(fontSize: 14, color: Colors.grey)) : const SizedBox.shrink()), 
+                                if (isReceivedRequest) 
+                                    FutureBuilder(future: Future.value(_familyMembers.firstWhere((m) => m['id'] == item.createdBy, orElse: () => {})['nickname']), builder: (context, snapshot) => snapshot.hasData && snapshot.data != null ? Text("From. ${snapshot.data}", style: const TextStyle(fontSize: 14, color: Colors.green)) : const SizedBox.shrink())
+                            ]
+                        )),
+                        if (hasLink) 
+                            IconButton(icon: const Icon(Icons.open_in_new, color: Colors.blue, size: 30), onPressed: () => _launchURL(item.linkUrl), tooltip: '링크 열기') 
+                        else 
+                            IconButton(icon: const Icon(Icons.edit, color: Colors.grey, size: 26), onPressed: () => _showDialog(false, item: item), tooltip: '수정하기') 
+                    ]),
+                );
+
+                return Dismissible(
+                    key: Key('item-T-${item.id}'),
+                    direction: DismissDirection.horizontal,
+                    background: Container(color: Colors.orange, alignment: Alignment.centerLeft, padding: const EdgeInsets.symmetric(horizontal: 20), child: const Row(children: [Icon(Icons.edit_note, color: Colors.white, size: 30), SizedBox(width: 10), Text("상세 작성", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))])),
+                    secondaryBackground: Container(color: Colors.green, alignment: Alignment.centerRight, padding: const EdgeInsets.symmetric(horizontal: 20), child: const Row(mainAxisAlignment: MainAxisAlignment.end, children: [Text("부탁하기", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)), SizedBox(width: 10), Icon(Icons.person_add, color: Colors.white, size: 30)])),
+                    confirmDismiss: (direction) async { if (direction == DismissDirection.startToEnd) _showDetailDialog(false, item, date); else _showAssignDialog(item); return false; }, 
+                    child: InkWell(onLongPress: () => _showEditDeleteMenu(false, item, date), borderRadius: BorderRadius.circular(10), child: cardContent),
+                );
+            },
+        );
+    }
+
+    // [객체지향] 필터 로직 분리 (일정)
+    List<ScheduleItem> _filterSchedulesForDate(List<ScheduleItem> source, DateTime date) {
         final viewDate = DateTime(date.year, date.month, date.day);
-
-        if (isSchedule) {
-            return source.where((item) {
-                DateTime start = DateTime.parse(item['start_date']);
-                DateTime end = DateTime.parse(item['end_date'] ?? item['start_date']);
-                
-                final cleanStart = DateTime(start.year, start.month, start.day);
-                final cleanEnd = DateTime(end.year, end.month, end.day);
-                final String repeat = item['repeat_option'] ?? 'none';
-
-                if (repeat == 'none') {
-                    return (cleanStart.isBefore(viewDate) || cleanStart.isAtSameMomentAs(viewDate)) && 
-                           (cleanEnd.isAfter(viewDate) || cleanEnd.isAtSameMomentAs(viewDate));
-                } else {
-                    if (viewDate.isBefore(cleanStart)) return false; 
-                    if (repeat == 'daily') return true; 
-                    if (repeat == 'weekly') return viewDate.weekday == cleanStart.weekday; 
-                    if (repeat == 'monthly') return viewDate.day == cleanStart.day; 
-                    return false;
-                }
-            }).toList();
-        }
-        
         return source.where((item) {
-            if (_selectedScheduleId != null && item['schedule_id'] != _selectedScheduleId) return false;
+            final cleanStart = DateTime(item.startDate.year, item.startDate.month, item.startDate.day);
+            final cleanEnd = DateTime(item.endDate.year, item.endDate.month, item.endDate.day);
+
+            if (item.repeatOption == 'none') {
+                return (cleanStart.isBefore(viewDate) || cleanStart.isAtSameMomentAs(viewDate)) && 
+                       (cleanEnd.isAfter(viewDate) || cleanEnd.isAtSameMomentAs(viewDate));
+            } else {
+                if (viewDate.isBefore(cleanStart)) return false; 
+                if (item.repeatOption == 'daily') return true; 
+                if (item.repeatOption == 'weekly') return viewDate.weekday == cleanStart.weekday; 
+                if (item.repeatOption == 'monthly') return viewDate.day == cleanStart.day; 
+                return false;
+            }
+        }).toList();
+    }
+
+    // [객체지향] 필터 로직 분리 (할 일) 및 [기능] 기간 미정 항목 항상 노출 처리
+    List<TodoItem> _filterTodosForDate(List<TodoItem> source, DateTime date) {
+        final viewDate = DateTime(date.year, date.month, date.day);
+        final dateStr = DateFormat('yyyy-MM-dd').format(date);
+
+        return source.where((item) {
+            if (_selectedScheduleId != null && item.scheduleId != _selectedScheduleId) return false;
             
-            DateTime targetDate = DateTime.parse(item['target_date']); 
-            final cleanTargetDate = DateTime(targetDate.year, targetDate.month, targetDate.day);
-            
+            // [핵심] 기간 미정인 할 일은 완료 전까지 항상 노출
+            if (item.isUndecided) {
+                bool isDone = _completions.any((c) => c['todo_id'] == item.id && c['completed_date'] == dateStr);
+                return !isDone; 
+            }
+
+            final cleanTargetDate = DateTime(item.targetDate.year, item.targetDate.month, item.targetDate.day);
             if (viewDate.isBefore(cleanTargetDate)) return false;
 
-            final String type = item['repeat_option'] ?? 'none';
-            
-            if (type == 'none') {
-                DateTime due = DateTime.parse(item['due_date'] ?? item['target_date']);
-                final cleanDue = DateTime(due.year, due.month, due.day);
+            if (item.repeatOption == 'none') {
+                final cleanDue = DateTime(item.dueDate.year, item.dueDate.month, item.dueDate.day);
                 return (cleanTargetDate.isBefore(viewDate) || cleanTargetDate.isAtSameMomentAs(viewDate)) && 
                        (cleanDue.isAfter(viewDate) || cleanDue.isAtSameMomentAs(viewDate));
             } 
-            else if (type == 'daily') return true; 
-            else if (type == 'weekly') return viewDate.weekday == targetDate.weekday;
-            else if (type == 'monthly') return viewDate.day == targetDate.day;
+            else if (item.repeatOption == 'daily') return true; 
+            else if (item.repeatOption == 'weekly') return viewDate.weekday == item.targetDate.weekday;
+            else if (item.repeatOption == 'monthly') return viewDate.day == item.targetDate.day;
             
             return false;
         }).toList();
@@ -1110,23 +1201,20 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
         return Container(padding: const EdgeInsets.all(10), color: Colors.grey.shade50, child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [IconButton(icon: const Icon(Icons.arrow_back_ios, size: 30), onPressed: () => _changeDate(-1)), Text(title, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.arrow_forward_ios, size: 30), onPressed: () => _changeDate(1))]));
     }
 
-    // [수정됨] 일일 뷰에서 리스트 비율 동적 조절
     Widget _buildDailyView() {
-        final dailySchedules = _filterItemsForDate(_schedules, _today, isSchedule: true);
-        final dailyTodos = _filterItemsForDate(_todos, _today, isSchedule: false);
+        final dailySchedules = _filterSchedulesForDate(_schedules, _today);
+        final dailyTodos = _filterTodosForDate(_todos, _today);
 
         int scheduleFlex = 5;
         int todoFlex = 5;
 
-        // 동적 비율 설정
         if (dailySchedules.isEmpty && dailyTodos.isNotEmpty) {
-            scheduleFlex = 3; // 일정이 없으면 작게
-            todoFlex = 7;     // 할 일이 있으면 길게
+            scheduleFlex = 3; 
+            todoFlex = 7;     
         } else if (dailySchedules.isNotEmpty && dailyTodos.isEmpty) {
-            scheduleFlex = 7; // 일정이 있으면 길게
-            todoFlex = 3;     // 할 일이 없으면 작게
+            scheduleFlex = 7; 
+            todoFlex = 3;     
         }
-        // 둘 다 있거나, 둘 다 없으면 5:5
 
         return GestureDetector(
             onHorizontalDragEnd: (details) { if (details.primaryVelocity! > 0) _changeDate(-1); else if (details.primaryVelocity! < 0) _changeDate(1); },
@@ -1134,10 +1222,10 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                 color: Colors.transparent, 
                 child: Column(
                     children: [
-                        Expanded(flex: scheduleFlex, child: _buildListView(true, _today)),
+                        Expanded(flex: scheduleFlex, child: _buildScheduleList(_today)),
                         const Divider(thickness: 2),
                         Padding(padding: const EdgeInsets.all(10), child: Text(_selectedScheduleId == null ? '오늘 할 일' : '선택된 일정의 할 일', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
-                        Expanded(flex: todoFlex, child: _buildListView(false, _today))
+                        Expanded(flex: todoFlex, child: _buildTodoList(_today))
                     ]
                 )
             ),
@@ -1161,8 +1249,8 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
                 final day = startCalendar.add(Duration(days: index));
                 final isToday = DateFormat('yyyy-MM-dd').format(day) == DateFormat('yyyy-MM-dd').format(DateTime.now());
                 final isCurrentMonth = day.month == _today.month;
-                final daySchedules = _filterItemsForDate(_schedules, day, isSchedule: true);
-                return InkWell(onTap: () => _goToDailyView(day), child: Container(margin: const EdgeInsets.all(2), decoration: BoxDecoration(color: isToday ? Colors.blue.shade50 : (isCurrentMonth ? Colors.white : Colors.grey.shade200), border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(5)), child: Column(children: [Text(day.day.toString(), style: TextStyle(fontSize: 16, fontWeight: isToday ? FontWeight.bold : FontWeight.normal, color: isCurrentMonth ? Colors.black : Colors.grey)), ...daySchedules.take(2).map((e) => Container(margin: const EdgeInsets.only(top: 2), width: double.infinity, color: Colors.blue.shade100, child: Text(e['title'], style: const TextStyle(fontSize: 10), maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center))), if(daySchedules.length > 2) const Text('...', style: TextStyle(fontSize: 10))])));
+                final daySchedules = _filterSchedulesForDate(_schedules, day);
+                return InkWell(onTap: () => _goToDailyView(day), child: Container(margin: const EdgeInsets.all(2), decoration: BoxDecoration(color: isToday ? Colors.blue.shade50 : (isCurrentMonth ? Colors.white : Colors.grey.shade200), border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(5)), child: Column(children: [Text(day.day.toString(), style: TextStyle(fontSize: 16, fontWeight: isToday ? FontWeight.bold : FontWeight.normal, color: isCurrentMonth ? Colors.black : Colors.grey)), ...daySchedules.take(2).map((e) => Container(margin: const EdgeInsets.only(top: 2), width: double.infinity, color: Colors.blue.shade100, child: Text(e.title, style: const TextStyle(fontSize: 10), maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center))), if(daySchedules.length > 2) const Text('...', style: TextStyle(fontSize: 10))])));
             })),
         ]);
     }
@@ -1170,8 +1258,8 @@ class _FamilySchedulePageState extends State<FamilySchedulePage> {
     Widget _buildCardForDay(DateTime day) {
         final dateStr = DateFormat('yyyy-MM-dd').format(day);
         final isToday = dateStr == DateFormat('yyyy-MM-dd').format(DateTime.now());
-        final dayEvents = _filterItemsForDate(_schedules, day, isSchedule: true);
-        return Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: isToday ? const BorderSide(color: Colors.blue, width: 2) : BorderSide.none), elevation: 3, color: isToday ? Colors.blue.shade50 : Colors.white, margin: const EdgeInsets.only(bottom: 16), child: InkWell(onTap: () => _goToDailyView(day), borderRadius: BorderRadius.circular(16), child: Padding(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(DateFormat('M월 d일 (E)', 'ko_KR').format(day), style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: isToday ? Colors.blue : Colors.black87)), if (dayEvents.isNotEmpty) Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: Colors.blue.shade100, borderRadius: BorderRadius.circular(12)), child: Text('${dayEvents.length}개', style: const TextStyle(fontSize: 14, color: Colors.blue, fontWeight: FontWeight.bold)))]), const SizedBox(height: 12), if (dayEvents.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('일정 없음', style: TextStyle(fontSize: 18, color: Colors.grey))) else ...dayEvents.map((e) { return Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [const Padding(padding: EdgeInsets.only(top: 6, right: 8), child: Icon(Icons.circle, size: 8, color: Colors.blue)), Expanded(child: Text(e['title'], style: const TextStyle(fontSize: 20, height: 1.3, fontWeight: FontWeight.w500)))])); })]))));
+        final dayEvents = _filterSchedulesForDate(_schedules, day);
+        return Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: isToday ? const BorderSide(color: Colors.blue, width: 2) : BorderSide.none), elevation: 3, color: isToday ? Colors.blue.shade50 : Colors.white, margin: const EdgeInsets.only(bottom: 16), child: InkWell(onTap: () => _goToDailyView(day), borderRadius: BorderRadius.circular(16), child: Padding(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(DateFormat('M월 d일 (E)', 'ko_KR').format(day), style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: isToday ? Colors.blue : Colors.black87)), if (dayEvents.isNotEmpty) Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: Colors.blue.shade100, borderRadius: BorderRadius.circular(12)), child: Text('${dayEvents.length}개', style: const TextStyle(fontSize: 14, color: Colors.blue, fontWeight: FontWeight.bold)))]), const SizedBox(height: 12), if (dayEvents.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('일정 없음', style: TextStyle(fontSize: 18, color: Colors.grey))) else ...dayEvents.map((e) { return Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [const Padding(padding: EdgeInsets.only(top: 6, right: 8), child: Icon(Icons.circle, size: 8, color: Colors.blue)), Expanded(child: Text(e.title, style: const TextStyle(fontSize: 20, height: 1.3, fontWeight: FontWeight.w500)))])); })]))));
     }
 
     Widget _buildBottomButtons() {
